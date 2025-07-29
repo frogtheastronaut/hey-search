@@ -1,19 +1,25 @@
 import requests
 import json
 import time
-import sys
+import sys, os
 from bs4 import BeautifulSoup # type: ignore
-import re
+from concurrent.futures import ThreadPoolExecutor
+import time
+import random
+
 
 # known websites that have not yet been crawled through
 known_websites = []
 known_website_data = []
+checking_websites = [] # websites crawler is checking
 
 # websites crawler has checked
 checked_websites = []
 failed_url_requests = []
 crawls = 0
 last_url_requested = ""
+stop = False
+
 
 KNOWN_WEBSITE_SCHEMES = (
     "https://",
@@ -45,7 +51,6 @@ STATUS_CODE_PASS = [
     102,
     103
 ]
-
 class Colors:
     HEADER = '\033[95m'
     OKBLUE = '\033[94m'
@@ -68,11 +73,19 @@ class Crawler:
         self.website_keywords = ""
 
     def read_json(self, filename='crawlres.json'):
-        with open(filename, 'r') as file:
-            return json.load(file)
+        full_path = os.path.abspath(filename)
+        cwd = os.getcwd()
+        with open(f"{cwd}/{filename}", 'r') as file:
+            res = json.load(file)
+            # print first 2 items
+            if 'site_known' in res and len(res['site_known']) > 0:
+                print(f"first entries {res['site_known'][:2]}")
+            print(f"full path of file: {full_path}")
+            return res
 
     def write_json(self, new_data, filename='crawlres.json'):
-        with open(filename, "w") as outfile:
+        cwd = os.getcwd()
+        with open(f"{cwd}/{filename}", "w") as outfile:
             json.dump(new_data, outfile, indent=4)
     def get_site_info(self, url):
         global crawls
@@ -87,6 +100,10 @@ class Crawler:
         links_in_site = []
         try:
             # get the site info
+            if url in checking_websites:
+                print(Colors.WARNING + f"already checked {url}, skipping..." + Colors.ENDC)
+                return
+            checking_websites.append(url)
             print(f"getting url {url}...")
             last_url_requested = url
             request = requests.get(url)
@@ -110,43 +127,46 @@ class Crawler:
                         print(Colors.BOLD + real_link + Colors.WARNING + " already checked. skipping..." + Colors.ENDC)
                         pass
                     else:
-                        # request real link
-                        print(f"requesting found link: {real_link}")
-                        last_url_requested = real_link
-                        href_request = requests.get(real_link)
-                        if href_request.status_code in STATUS_CODE_PASS:
-                            print(Colors.OKBLUE + "request success" + Colors.ENDC)
-                            sub_soup = BeautifulSoup(href_request.text, 'html.parser')
-                            known_websites.append(real_link)
-                            og = self.get_og(sub_soup)
-                            keywords = self.get_site_keywords(real_link, og['site'], og['title'], og['desc'], og['site_content'])
-                            known_website_data.append(
-                                [real_link, keywords]
-                            )
+                        if real_link in checking_websites:
+                            # already checking this link
+                            print(Colors.WARNING + f"already checked {real_link}, skipping.." + Colors.ENDC)
+                            pass
                         else:
-                            print(Colors.FAIL + "request failed" + Colors.ENDC)
-                            failed_url_requests.append(real_link)
+                            # request real link
+                            print(f"requesting found link: {real_link}")
+                            last_url_requested = real_link
+                            href_request = requests.get(real_link)
+                            if href_request.status_code in STATUS_CODE_PASS:
+                                print(Colors.OKBLUE + "request success" + Colors.ENDC)
+                                sub_soup = BeautifulSoup(href_request.text, 'html.parser')
+                                known_websites.append(real_link)
+                                og = self.get_og(sub_soup)
+                                keywords = self.get_site_keywords(real_link, og['site'], og['title'], og['desc'], og['site_content'])
+                                known_website_data.append(
+                                    [real_link, keywords]
+                                )
+                            else:
+                                print(Colors.FAIL + "request failed" + Colors.ENDC)
+                                failed_url_requests.append(real_link)
             checked_websites.append(url)
-            self.write_json(
-                {
-                    "site_known": known_websites,
-                    "site_known_data": known_website_data,
-                    "site_checked": checked_websites,
-                }
-            )
             self.repeats = 0
             return links_in_site
-        except requests.exceptions.ConnectionError:
-            if self.repeats > 3:
-                print(Colors.FAIL + "retries exceeded. breaking." + Colors.ENDC)
-                failed_url_requests.append(last_url_requested)
-                self.repeats = 0
+        except Exception as e:
+            if e == requests.exceptions.ConnectionError:
+                print(Colors.FAIL + "connection error" + Colors.ENDC)
+                if self.repeats > 3:
+                    print(Colors.FAIL + "retries exceeded. breaking." + Colors.ENDC)
+                    failed_url_requests.append(last_url_requested)
+                    self.repeats = 0
+                else:
+                    print(Colors.WARNING + "connection failed. sleeping..." + Colors.WARNING)
+                    time.sleep(1)
+                    print(Colors.WARNING +"reconnecting to last url..." + Colors.WARNING)
+                    self.repeats += 1
+                    self.get_site_info(last_url_requested)
             else:
-                print(Colors.WARNING + "connection failed. sleeping..." + Colors.WARNING)
-                time.sleep(1)
-                print(Colors.WARNING +"reconnecting to last url..." + Colors.WARNING)
-                self.repeats += 1
-                self.get_site_info(last_url_requested)
+                failed_url_requests.append(last_url_requested)
+                self.get_site_info(url)
     def get_og(self, soup):
         # gets the open graph meta information of a soup
         title = soup.find("meta",  property="og:title")
@@ -201,15 +221,35 @@ class CrawlBot:
     def crawl(self):
         global crawls
         print(Colors.HEADER + "initiating crawl.." + Colors.ENDC)
-        for website in known_websites:
-            print(f"crawling {website}")
-            self.crawler.get_site_info(website)
-            crawls += 1
+        while stop != True:
+            website = random.choice(known_websites)
+            if website in checked_websites or website in failed_url_requests:
+                print(Colors.BOLD + Colors.WARNING + f"{website} already checked" + Colors.ENDC)
+                if crawls == 0:
+                    print("db seems to have data. crawling last...")
+                    self.crawler.get_site_info(known_websites[-1])
+            else:
+                print(f"crawling {website}")
+                self.crawler.get_site_info(website)
+                self.crawler.write_json(
+                    {
+                        "site_known": known_websites,
+                        "site_known_data": known_website_data,
+                        "site_checked": checked_websites,
+                    }
+                )
+                print(Colors.OKGREEN + f"wrote to json" + Colors.ENDC)
+                crawls += 1
             
 
 if __name__ == "__main__":
-    known_websites = [sys.argv[1]]
+    known_websites = [sys.argv[1] if len(sys.argv) > 1 else "https://google.com"]
     crawlbot = CrawlBot()
-    crawlbot.crawl()
+    futures = []
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        for _ in range(20):
+            executor.submit(crawlbot.crawl)
+            time.sleep(2.29)
+
 
 
