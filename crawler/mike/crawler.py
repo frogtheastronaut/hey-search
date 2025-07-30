@@ -71,11 +71,11 @@ class Crawler:
         self.repeats = 0
         self.read_database()
         self.website_keywords = ""
+        self.cwd = os.getcwd()
 
     def read_json(self, filename='crawlres.json'):
         full_path = os.path.abspath(filename)
-        cwd = os.getcwd()
-        with open(f"{cwd}/{filename}", 'r') as file:
+        with open(f"{self.cwd}/{filename}", 'r') as file:
             res = json.load(file)
             # print first 2 items
             if 'site_known' in res and len(res['site_known']) > 0:
@@ -84,15 +84,15 @@ class Crawler:
             return res
 
     def write_json(self, new_data, filename='crawlres.json'):
-        cwd = os.getcwd()
-        with open(f"{cwd}/{filename}", "w") as outfile:
+        with open(f"{self.cwd}/{filename}", "w") as outfile:
             json.dump(new_data, outfile, indent=4)
+        print(Colors.OKGREEN + f"wrote to {self.cwd}/{filename}" + Colors.ENDC)
     def get_site_info(self, url):
         global crawls
         global known_websites
         global last_url_requested
         if url in checked_websites or url in failed_url_requests:
-            print(Colors.BOLD + Colors.WARNING + f"{url} already checked" + Colors.ENDC)
+            print(Colors.BOLD + Colors.WARNING + f"{url} already checked ##" + Colors.ENDC)
             if crawls == 0:
                 print("db seems to have data. crawling last...")
                 self.get_site_info(known_websites[-1])
@@ -130,14 +130,15 @@ class Crawler:
                         if real_link in checking_websites:
                             # already checking this link
                             print(Colors.WARNING + f"already checked {real_link}, skipping.." + Colors.ENDC)
+                            known_websites.append(real_link)
                             pass
                         else:
                             # request real link
-                            print(f"requesting found link: {real_link}")
+                            print(f"requesting found link")
                             last_url_requested = real_link
                             href_request = requests.get(real_link)
                             if href_request.status_code in STATUS_CODE_PASS:
-                                print(Colors.OKBLUE + "request success" + Colors.ENDC)
+                                print(Colors.OKBLUE + f"request success: {real_link}" + Colors.ENDC)
                                 sub_soup = BeautifulSoup(href_request.text, 'html.parser')
                                 known_websites.append(real_link)
                                 og = self.get_og(sub_soup)
@@ -146,7 +147,7 @@ class Crawler:
                                     [real_link, keywords]
                                 )
                             else:
-                                print(Colors.FAIL + "request failed" + Colors.ENDC)
+                                print(Colors.FAIL + f"request failed: {real_link}" + Colors.ENDC)
                                 failed_url_requests.append(real_link)
             checked_websites.append(url)
             self.repeats = 0
@@ -221,13 +222,14 @@ class CrawlBot:
     def crawl(self):
         global crawls
         print(Colors.HEADER + "initiating crawl.." + Colors.ENDC)
-        while stop != True:
-            website = random.choice(known_websites)
+        for website in known_websites:
             if website in checked_websites or website in failed_url_requests:
                 print(Colors.BOLD + Colors.WARNING + f"{website} already checked" + Colors.ENDC)
-                if crawls == 0:
+                if crawls == 0 and len(known_websites) > 1:
                     print("db seems to have data. crawling last...")
                     self.crawler.get_site_info(known_websites[-1])
+                    #time.sleep(0.31)
+                return
             else:
                 print(f"crawling {website}")
                 self.crawler.get_site_info(website)
@@ -238,18 +240,18 @@ class CrawlBot:
                         "site_checked": checked_websites,
                     }
                 )
-                print(Colors.OKGREEN + f"wrote to json" + Colors.ENDC)
+                #print(Colors.OKGREEN + f"wrote to {self.crawler.cwd}/{self.crawler.filename}" + Colors.ENDC)
                 crawls += 1
-            
-
+# sleep_times is 50 prime numbers
+sleep_times = [0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38, 0.39, 0.40, 0.41, 0.43, 0.44, 0.45, 0.46, 0.47, 0.49, 0.50, 0.53, 0.59, 0.61, 0.67, 0.71, 0.73, 0.79, 0.83, 0.89, 0.97, 0.101, 0.103, 0.107, 0.109, 0.113, 0.127, 0.131, 0.137, 0.139, 0.149, 0.151, 0.157, 0.163, 0.167, 0.173, 0.179, 0.181, 0.191, 0.193, 0.197, 0.199, 0.211, 0.223, 0.227, 0.229, 0.233, 0.239, 0.241, 0.251, 0.257, 0.263, 0.269, 0.271, 0.277, 0.281, 0.283, 0.293]
 if __name__ == "__main__":
     known_websites = [sys.argv[1] if len(sys.argv) > 1 else "https://google.com"]
     crawlbot = CrawlBot()
     futures = []
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        for _ in range(20):
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        for _ in range(50):
             executor.submit(crawlbot.crawl)
-            time.sleep(2.29)
-
-
-
+            #time.sleep(random.choice(sleep_times))
+            sleep_time = random.choice(sleep_times)
+            time.sleep(sleep_time) # avoid rush hour traffic
+            sleep_times.remove(sleep_time) # remove used sleep time
