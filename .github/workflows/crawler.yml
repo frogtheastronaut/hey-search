@@ -9,6 +9,10 @@ on:
   # Schedule to run every 6 hours
   schedule:
     - cron: '0 */6 * * *'
+permissions:
+  contents: write
+  pages: write
+  id-token: write
 
 jobs:
   crawler:
@@ -17,8 +21,8 @@ jobs:
     
     strategy:
       matrix:
-        # Run multiple instances in parallel for better coverage
-        instance: [1, 2, 3]
+        # Reduce to single instance to avoid resource exhaustion
+        instance: [1]
     
     steps:
     - name: Checkout repository
@@ -48,8 +52,26 @@ jobs:
       timeout-minutes: 270  # 4.5 hours
       run: |
         cd crawler
-        # Add timeout to prevent infinite running
-        timeout 16200 make run-all || echo "Crawler timed out after 4.5 hours"
+        echo "Starting crawlers at $(date)"
+        echo "Available bot directories:"
+        ls -la bot_*/
+        
+        # Run a smaller subset first to test
+        echo "Running first 10 bots only to prevent resource exhaustion..."
+        
+        # Start first 10 bots with staggered delays
+        for i in {1..10}; do
+          echo "Starting bot_$i at $(date)"
+          cd bot_$i && python3 crawler.py https://$(sed -n "${i}p" ../urls.txt 2>/dev/null || echo "google.com") &
+          cd ..
+          sleep 5  # 5 second delay between starts
+        done
+        
+        # Wait for all background processes
+        echo "Waiting for all crawlers to complete..."
+        wait
+        
+        echo "All crawlers finished at $(date)"
         
     - name: Collect crawl results
       if: always()  # Run even if crawlers timeout
