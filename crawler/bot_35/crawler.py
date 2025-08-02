@@ -15,8 +15,9 @@ checking_websites = set()
 checked_websites = set()
 failed_url_requests = set()
 crawls = 0
-last_url_requested = ""
 stop = False # whether the crawler should stop
+MAX_WORKERS = 20
+MAX_CRAWLERS = 10
 
 # website locks
 websites_lock = threading.Lock()
@@ -64,7 +65,10 @@ class Crawler:
         global known_websites
         # init vars
         self.repeats = 0
+        self.current_datacrawl_workers = 0
         self.website_keywords = ""
+        self.last_url_requested = ""
+        self.last_url_requested_lock = threading.Lock()
         self.cwd = os.getcwd()
         self.read_database()
 
@@ -119,7 +123,8 @@ class Crawler:
         links_in_site = []
         try:
             print(f"getting url {url}...")
-            last_url_requested = url
+            with self.last_url_requested_lock:
+                self.last_url_requested = url
             request = requests.get(url, timeout=10)
             print(Colors.OKBLUE + "url received" + Colors.ENDC)
             
@@ -128,61 +133,18 @@ class Crawler:
                 href = link.get('href')
                 if href:
                     links_in_site.append(href)
-            
-            for link2 in links_in_site:
-                if stop == True:
-                    print(Colors.OKCYAN + "stopping crawler bot..." + Colors.ENDC)
-                    return
-                if link2 == None or len(link2) == 0:
-                    continue
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = []
+                for link2 in links_in_site:
+                    while self.current_datacrawl_workers >= MAX_WORKERS:
+                        # wait for queue to clear
+                        time.sleep(0.05)
+                    futures.append(executor.submit(self.crawl_found_url, link2, url))
+                    self.current_datacrawl_workers += 1
                 
-                if link2.startswith(KNOWN_WEBSITE_SCHEMES):
-                    real_link = link2
-                else:
-                    real_link = url + link2
-                real_link = self.process_url(real_link)
-                
-                with websites_lock:
-                    if real_link in checked_websites or real_link in known_websites or real_link in failed_url_requests:
-                        print(Colors.BOLD + real_link + Colors.WARNING + " already checked. skipping..." + Colors.ENDC)
-                        continue
-                    
-                    if real_link in checking_websites:
-                        print(Colors.WARNING + f"already checking {real_link}, skipping.." + Colors.ENDC)
-                        continue
-                    
-                    checking_websites.add(real_link)
-                
-                try:
-                    print(f"requesting found link")
-                    last_url_requested = real_link
-                    href_request = requests.get(real_link, timeout=5)
-                    
-                    if href_request.status_code in STATUS_CODE_PASS:
-                        print(Colors.OKBLUE + f"request success: {real_link}" + Colors.ENDC)
-                        sub_soup = BeautifulSoup(href_request.text, 'html.parser')
-                        
-                        with websites_lock:
-                            known_websites.add(real_link)
-                            checking_websites.discard(real_link)
-                        # these are the keywords we want to extract
-                        og = self.get_og(sub_soup)
-                        keywords = self.get_site_keywords(self.get_url_keywords(real_link), og['site'], og['title'], og['desc'], og['site_content'])
+                for future in futures:
+                    future.result()
 
-                        with data_lock:
-                            # put the keywords into known_website_data
-                            known_website_data[real_link] = keywords
-                    else:
-                        print(Colors.FAIL + f"request failed: {real_link}" + Colors.ENDC)
-                        with websites_lock:
-                            failed_url_requests.add(real_link)
-                            checking_websites.discard(real_link)
-                            
-                except Exception:
-                    with websites_lock:
-                        failed_url_requests.add(real_link)
-                        checking_websites.discard(real_link)
-            
             with websites_lock:
                 checked_websites.add(url)
                 checking_websites.discard(url)
@@ -202,13 +164,75 @@ class Crawler:
                     return self.get_site_info(url)
                 else:
                     with websites_lock:
-                        failed_url_requests.add(last_url_requested)
+                        with self.last_url_requested_lock:
+                            failed_url_requests.add(self.last_url_requested)
                     self.repeats = 0
             else:
                 with websites_lock:
-                    failed_url_requests.add(last_url_requested)
+                    with self.last_url_requested_lock:
+                        failed_url_requests.add(self.last_url_requested)
             return []
+    def crawl_found_url(self, link2, original_url):
+            # note: link2 is url. called link2 for consistency with get_site_info()
+            if stop == True:
+                print(Colors.OKCYAN + "stopping crawler bot..." + Colors.ENDC)
+                self.current_datacrawl_workers -= 1
+                return
+            if link2 == None or len(link2) == 0:
+                self.current_datacrawl_workers -= 1
+                return
+            
+            if link2.startswith(KNOWN_WEBSITE_SCHEMES):
+                real_link = link2
+            else:
+                real_link = original_url + link2
+            real_link = self.process_url(real_link)
+            
+            with websites_lock:
+                if real_link in checked_websites or real_link in known_websites or real_link in failed_url_requests:
+                    print(Colors.BOLD + real_link + Colors.WARNING + " already checked. skipping..." + Colors.ENDC)
+                    self.current_datacrawl_workers -= 1
+                    return
+                
+                if real_link in checking_websites:
+                    print(Colors.WARNING + f"already checking {real_link}, skipping.." + Colors.ENDC)
+                    self.current_datacrawl_workers -= 1
+                    return
 
+                checking_websites.add(real_link)
+            
+            try:
+                print(f"requesting found link")
+                with self.last_url_requested_lock:
+                    self.last_url_requested = real_link
+                href_request = requests.get(real_link, timeout=5)
+                
+                if href_request.status_code in STATUS_CODE_PASS:
+                    print(Colors.OKBLUE + f"request success: {real_link}" + Colors.ENDC)
+                    sub_soup = BeautifulSoup(href_request.text, 'html.parser')
+                    
+                    with websites_lock:
+                        known_websites.add(real_link)
+                        checking_websites.discard(real_link)
+                    # these are the keywords we want to extract
+                    og = self.get_og(sub_soup)
+                    keywords = self.get_site_keywords(self.get_url_keywords(real_link), og['site'], og['title'], og['desc'], og['site_content'])
+
+                    with data_lock:
+                        # put the keywords into known_website_data
+                        known_website_data[real_link] = keywords
+                else:
+                    print(Colors.FAIL + f"request failed: {real_link}" + Colors.ENDC)
+                    with websites_lock:
+                        failed_url_requests.add(real_link)
+                        checking_websites.discard(real_link)
+                        
+            except Exception:
+                with websites_lock:
+                    failed_url_requests.add(real_link)
+                    checking_websites.discard(real_link)
+            self.current_datacrawl_workers -= 1
+            return 0
     def get_og(self, soup):
         # gets the open graph meta information of a soup
         title = soup.find("meta",  property="og:title")
@@ -354,16 +378,20 @@ class CrawlBot:
                 time.sleep(1)
         print(Colors.OKCYAN + "this process stopped. bye!" + Colors.ENDC)
 
+# sleep times are random prime numbers
+sleep_times = [0.31, 0.37, 0.41, 0.43, 0.47, 0.53, 0.59, 0.61, 0.67, 0.71, 0.73, 0.79, 0.83, 0.89, 0.97]
 if __name__ == "__main__":
     initial_site = sys.argv[1] if len(sys.argv) > 1 else "https://google.com"
     with websites_lock:
         known_websites.add(initial_site)
     
     crawlbot = CrawlBot()
-    
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = [executor.submit(crawlbot.crawl) for _ in range(10)]
-        
+
+    with ThreadPoolExecutor(max_workers=MAX_CRAWLERS) as executor:
+        futures = []
+        for _ in range(MAX_CRAWLERS):
+            futures.append(executor.submit(crawlbot.crawl))
+
         try:
             for future in futures:
                 future.result()
