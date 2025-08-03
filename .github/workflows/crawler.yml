@@ -17,11 +17,11 @@ permissions:
 jobs:
   crawler:
     runs-on: ubuntu-latest
-    timeout-minutes: 300  # 5 hours max runtime
+    timeout-minutes: 25  # 25 minutes max runtime
     
     strategy:
       matrix:
-        # Reduce to single instance to avoid resource exhaustion
+        # Single instance
         instance: [1]
     
     steps:
@@ -49,27 +49,15 @@ jobs:
         make copy
         
     - name: Run crawlers (with timeout)
-      timeout-minutes: 270  # 4.5 hours
+      timeout-minutes: 20  # 20 minutes
       run: |
         cd crawler
-        echo "Starting crawlers at $(date)"
+        echo "Starting all 50 crawlers at $(date)"
         echo "Available bot directories:"
         ls -la bot_*/
         
-        # Run a smaller subset first to test
-        echo "Running first 10 bots only to prevent resource exhaustion..."
-        
-        # Start first 10 bots with staggered delays
-        for i in {1..10}; do
-          echo "Starting bot_$i at $(date)"
-          cd bot_$i && python3 crawler.py https://$(sed -n "${i}p" ../urls.txt 2>/dev/null || echo "google.com") &
-          cd ..
-          sleep 5  # 5 second delay between starts
-        done
-        
-        # Wait for all background processes
-        echo "Waiting for all crawlers to complete..."
-        wait
+        # Use the makefile to start all bots
+        timeout 1200 make run-all || echo "Crawlers timed out after 20 minutes"
         
         echo "All crawlers finished at $(date)"
         
@@ -108,52 +96,10 @@ jobs:
           fi
         done
 
-  # Optional: Deploy results to GitHub Pages
-  deploy-results:
-    runs-on: ubuntu-latest
-    needs: crawler
-    if: always()
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Download all crawl artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts/
-        pattern: crawl-results-*
-        merge-multiple: true
-        
-    - name: Combine all results
-      run: |
-        mkdir -p public
-        echo "# Web Crawler Results" > public/README.md
-        echo "Generated on: $(date)" >> public/README.md
-        echo "" >> public/README.md
-        
-        # List all artifact files
-        echo "## Available Results" >> public/README.md
-        find artifacts/ -name "*.json" -type f | while read file; do
-          rel_path=$(echo "$file" | sed 's|artifacts/||')
-          size=$(du -h "$file" | cut -f1)
-          echo "- [$rel_path]($rel_path) ($size)" >> public/README.md
-        done
-        
-        # Copy all JSON files to public directory
-        find artifacts/ -name "*.json" -type f -exec cp {} public/ \;
-        
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
-      if: github.ref == 'refs/heads/main'
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./public
-        
   # Cleanup old artifacts
   cleanup:
     runs-on: ubuntu-latest
-    needs: [crawler, deploy-results]
+    needs: crawler
     if: always()
     
     steps:
